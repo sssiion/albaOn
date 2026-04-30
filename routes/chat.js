@@ -18,7 +18,7 @@ const groq = new OpenAI({
 // 채팅 (알바생이 질문)
 router.post('/:storeId', async (req, res) => {
   const { storeId } = req.params;
-  const { question } = req.body;
+ const { question, workerName } = req.body;
 
   if (!question) return res.status(400).json({ error: '질문 필수' });
 
