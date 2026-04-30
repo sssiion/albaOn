@@ -61,6 +61,7 @@ router.get('/:storeId', auth, async (req, res) => {
 });
 
 // ── 매뉴얼 저장 ────────────────────────────────
+// ── 매뉴얼 저장 ────────────────────────────────
 router.post('/:storeId', auth, async (req, res) => {
   const { content } = req.body;
   const { storeId } = req.params;
@@ -102,7 +103,7 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
       organizedContent = content;
     }
 
-    // 2. 원본 저장 (is_chunk: false)
+    // 2. 원본 저장
     await supabase.from('manuals').insert({
       store_id:         storeId,
       title,
@@ -111,7 +112,7 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
       is_chunk:         false
     });
 
-    // 3. 청크 + 임베딩 저장 (is_chunk: true)
+    // 3. 청크 + 임베딩 저장
     const chunks = splitIntoChunks(organizedContent);
     for (const chunk of chunks) {
       const embRes = await openai.embeddings.create({
@@ -126,6 +127,9 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
         embedding: embRes.data[0].embedding
       });
     }
+
+    // 4. 미답변 질문 자동 재답변
+    await reanswerPending(storeId);
 
     res.json({ ok: true, title, organizedContent });
 
