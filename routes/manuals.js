@@ -300,53 +300,93 @@ router.patch('/:storeId/:manualId/category', auth, async (req, res) => {
 });
 
 // ── 매뉴얼 수정 ────────────────────────────────
-router.put('/:storeId/:manualId', auth, async (req, res) => {
+router.put('/:manualId', auth, async (req, res) => {
   const { content } = req.body;
-  const { storeId, manualId } = req.params;
+  const { manualId } = req.params;
 
   if (!content) return res.status(400).json({ error: '내용 필수' });
 
   try {
-    // 수정할 매뉴얼 제목 조회
+    // 수정할 매뉴얼 조회
     const { data: original } = await supabase
       .from('manuals')
-      .select('title')
+      .select('title, store_id')
       .eq('id', manualId)
       .single();
+
+    // GPT로 재정리
+    const organized = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
+아래 텍스트를 최대한 상세하고 구체적으로 정리해주세요.
+
+규칙:
+1. 하나의 내용도 여러 항목으로 세분화해서 작성해요
+2. 절차가 있으면 순서대로 나눠요
+3. 위치, 방법, 주의사항을 각각 별도 항목으로 작성해요
+4. 최소 3개 이상의 세부 항목으로 나눠요
+
+출력 형식 (JSON):
+{
+  "title": "제목",
+  "content": "## 중분류\\n### 소분류\\n- 내용"
+}
+JSON만 출력하세요.`
+        },
+        { role: 'user', content }
+      ],
+      max_tokens: 1000,
+      temperature: 0.2
+    });
+
+    let title = original.title;
+    let organizedContent = content;
+
+    try {
+      const parsed = JSON.parse(organized.choices[0].message.content);
+      title = parsed.title || original.title;
+      organizedContent = parsed.content || content;
+    } catch {
+      organizedContent = content;
+    }
 
     // 원본 업데이트
     await supabase
       .from('manuals')
-      .update({ content, original_content: content })
-      .eq('id', manualId)
-      .eq('store_id', storeId);
+      .update({ content: organizedContent, original_content: content })
+      .eq('id', manualId);
 
     // 기존 청크 삭제
     await supabase
       .from('manuals')
       .delete()
-      .eq('store_id', storeId)
+      .eq('store_id', original.store_id)
       .eq('title', original.title)
       .eq('is_chunk', true);
 
-    // 새 청크 + 임베딩 생성
-    const chunks = splitIntoChunks(content);
+    // 새 청크 + 임베딩
+    const chunks = splitIntoChunks(organizedContent);
     for (const chunk of chunks) {
       const embRes = await openai.embeddings.create({
         model: 'text-embedding-3-small',
         input: chunk
       });
       await supabase.from('manuals').insert({
-        store_id:  storeId,
-        title:     original.title,
+        store_id:  original.store_id,
+        title,
         content:   chunk,
         is_chunk:  true,
         embedding: embRes.data[0].embedding
       });
     }
-    //수정 후 미답변 재처리
-    await reanswerPending(storeId);
-    res.json({ ok: true });
+
+    // 미답변 재처리
+    await reanswerPending(original.store_id);
+
+    res.json({ ok: true, title, organizedContent });
 
   } catch (err) {
     console.error('[manual update error]', err.message);
