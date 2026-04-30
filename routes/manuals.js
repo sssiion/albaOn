@@ -357,7 +357,6 @@ router.delete('/:storeId/:manualId', auth, async (req, res) => {
   const { storeId, manualId } = req.params;
 
   try {
-    // 제목 조회
     const { data: original } = await supabase
       .from('manuals')
       .select('title')
@@ -365,22 +364,15 @@ router.delete('/:storeId/:manualId', auth, async (req, res) => {
       .single();
 
     // 원본 삭제
-    await supabase
-      .from('manuals')
-      .delete()
-      .eq('id', manualId)
-      .eq('store_id', storeId);
+    await supabase.from('manuals').delete().eq('id', manualId);
 
-    // 관련 청크도 삭제
-    await supabase
-      .from('manuals')
-      .delete()
+    // 같은 제목의 청크 전부 삭제
+    await supabase.from('manuals').delete()
       .eq('store_id', storeId)
       .eq('title', original.title)
       .eq('is_chunk', true);
 
     res.json({ ok: true });
-
   } catch (err) {
     console.error('[manual delete error]', err.message);
     res.status(500).json({ error: '삭제 실패' });
