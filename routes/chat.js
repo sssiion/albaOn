@@ -83,10 +83,7 @@ ${context || '등록된 매뉴얼이 없어요.'}`
 router.get('/:storeId/logs', auth, async (req, res) => {
   const { data, error } = await supabase
     .from('chat_logs')
-    .select(`
-      id, question, answer, is_answered, created_at,
-      users(name)
-    `)
+    .select('id, question, answer, is_answered, worker_name, created_at')  // worker_name 추가
     .eq('store_id', req.params.storeId)
     .order('created_at', { ascending: false })
     .limit(50);
