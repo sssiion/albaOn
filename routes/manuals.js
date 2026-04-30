@@ -405,4 +405,132 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
   }
 });
 
+// 기초 매뉴얼 저장
+router.post('/:storeId/basic', auth, async (req, res) => {
+  const { content } = req.body;
+  const { storeId } = req.params;
+
+  if (!content) return res.status(400).json({ error: '내용 필수' });
+
+  try {
+    const { data: categories } = await supabase
+      .from('categories')
+      .select('id, name')
+      .eq('store_id', storeId);
+
+    const categoryList = categories?.map(c => c.name).join(', ') || '';
+
+    const organized = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `편의점/카페/식당 첫 출근 알바생을 위한 기초 매뉴얼 작성 전문가예요.
+아래 텍스트를 첫 출근자가 이해하기 쉽게 정리해주세요.
+
+규칙:
+1. 입력된 내용에 없는 정보는 절대 추가하지 마세요
+2. 처음 보는 사람도 이해할 수 있게 단계별로 작성해요
+3. 최소 3개 이상의 세부 항목으로 나눠요
+
+${categoryList ? `현재 카테고리: ${categoryList}` : ''}
+
+출력 형식 (JSON):
+{
+  "category": "카테고리명",
+  "title": "제목",
+  "content": "## 중분류\\n### 소분류\\n- 내용"
+}
+JSON만 출력하세요.`
+        },
+        { role: 'user', content }
+      ],
+      max_tokens: 1000,
+      temperature: 0.2
+    });
+
+    let categoryName = '기초';
+    let title = '기초 매뉴얼';
+    let organizedContent = content;
+
+    try {
+      const parsed = JSON.parse(organized.choices[0].message.content);
+      categoryName   = parsed.category || '기초';
+      title          = parsed.title    || '기초 매뉴얼';
+      organizedContent = parsed.content || content;
+    } catch {
+      organizedContent = content;
+    }
+
+    // 카테고리 찾거나 생성
+    let categoryId = null;
+    const existingCat = categories?.find(
+      c => c.name.toLowerCase() === categoryName.toLowerCase()
+    );
+    if (existingCat) {
+      categoryId = existingCat.id;
+    } else {
+      const { data: newCat } = await supabase
+        .from('categories')
+        .insert({ store_id: storeId, name: categoryName })
+        .select()
+        .single();
+      categoryId = newCat?.id;
+    }
+
+    // 원본 저장 (manual_type: basic)
+    const { data: saved } = await supabase.from('manuals').insert({
+      store_id:         storeId,
+      category_id:      categoryId,
+      title,
+      content:          organizedContent,
+      original_content: content,
+      is_chunk:         false,
+      manual_type:      'basic'
+    }).select().single();
+
+    // 청크 + 임베딩
+    const chunks = splitIntoChunks(organizedContent);
+    for (const chunk of chunks) {
+      const embRes = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: chunk
+      });
+      await supabase.from('manuals').insert({
+        store_id:    storeId,
+        category_id: categoryId,
+        title,
+        content:     chunk,
+        is_chunk:    true,
+        manual_type: 'basic',
+        embedding:   embRes.data[0].embedding
+      });
+    }
+
+    await reanswerPending(storeId);
+    res.json({ ok: true, title, manualId: saved.id });
+
+  } catch (err) {
+    console.error('[basic manual error]', err.message);
+    res.status(500).json({ error: '저장 실패' });
+  }
+});
+
+// 기초 매뉴얼 목록 조회
+router.get('/:storeId/basic', auth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('manuals')
+    .select(`
+      id, title, content, original_content, category_id, created_at,
+      manual_media(id, type, url, caption, order_num)
+    `)
+    .eq('store_id', req.params.storeId)
+    .eq('is_chunk', false)
+    .eq('manual_type', 'basic')
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 module.exports = router;
