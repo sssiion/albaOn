@@ -53,10 +53,10 @@ ${context || '등록된 매뉴얼이 없어요.'}`
     const answer = completion.choices[0].message.content;
     const isAnswered = !answer.includes('매뉴얼에 없는 내용');
 
-    // 4. 로그 저장
+    // 로그 저장 시 worker_id 대신 worker_name 저장
     await supabase.from('chat_logs').insert({
-      store_id: storeId,
-      worker_id: req.user.userId,
+      store_id:    storeId,
+      worker_name: workerName || '알바생',  // worker_id 대신
       question,
       answer,
       is_answered: isAnswered
