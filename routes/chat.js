@@ -127,7 +127,7 @@ router.post('/:storeId/reanswer/:logId', auth, async (req, res) => {
       messages: [
         {
           role: 'system',
-          content: content: `당신은 편의점 알바생을 도와주는 친절한 AI 도우미예요.
+          content: `당신은 편의점 알바생을 도와주는 친절한 AI 도우미예요.
 아래 매장 매뉴얼을 참고해서 짧고 명확하게 답변해주세요.
 
 규칙:
