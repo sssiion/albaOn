@@ -50,7 +50,7 @@ function splitIntoChunks(text, size = 500) {
 }
 
 // 매뉴얼 목록 조회
-router.get('/:storeId',  async (req, res) => {
+router.get('/:storeId', auth, async (req, res) => {
   const { data, error } = await supabase
     .from('manuals')
     .select('id, title, content, created_at')
