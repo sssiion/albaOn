@@ -29,7 +29,22 @@ router.post('/:storeId', auth, async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
+// 카테고리 이름 수정
+router.put('/:storeId/:categoryId', auth, async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: '이름 필수' });
 
+  const { data, error } = await supabase
+    .from('categories')
+    .update({ name: name.trim() })
+    .eq('id', req.params.categoryId)
+    .eq('store_id', req.params.storeId)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
 // 카테고리 삭제
 router.delete('/:storeId/:categoryId', auth, async (req, res) => {
   const { error } = await supabase
