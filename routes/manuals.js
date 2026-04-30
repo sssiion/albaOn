@@ -420,12 +420,20 @@ router.post('/:storeId/basic', auth, async (req, res) => {
 
     const categoryList = categories?.map(c => c.name).join(', ') || '';
 
-    const organized = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: `편의점/카페/식당 첫 출근 알바생을 위한 기초 매뉴얼 작성 전문가예요.
+    // 긴 텍스트는 2000자씩 나눠서 처리
+    const CHUNK_SIZE = 2000;
+    const textChunks = [];
+    for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+      textChunks.push(content.slice(i, i + CHUNK_SIZE));
+    }
+
+    for (const chunk of textChunks) {
+      const organized = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `편의점/카페/식당 첫 출근 알바생을 위한 기초 매뉴얼 작성 전문가예요.
 아래 텍스트를 첫 출근자가 이해하기 쉽게 정리해주세요.
 
 규칙:
@@ -442,77 +450,76 @@ ${categoryList ? `현재 카테고리: ${categoryList}` : ''}
   "content": "## 중분류\\n### 소분류\\n- 내용"
 }
 JSON만 출력하세요.`
-        },
-        { role: 'user', content }
-      ],
-      max_tokens: 1000,
-      temperature: 0.2
-    });
-
-    let categoryName = '기초';
-    let title = '기초 매뉴얼';
-    let organizedContent = content;
-
-    try {
-      const parsed = JSON.parse(organized.choices[0].message.content);
-      categoryName   = parsed.category || '기초';
-      title          = parsed.title    || '기초 매뉴얼';
-      organizedContent = parsed.content || content;
-    } catch {
-      organizedContent = content;
-    }
-
-    // 카테고리 찾거나 생성
-    let categoryId = null;
-    const existingCat = categories?.find(
-      c => c.name.toLowerCase() === categoryName.toLowerCase()
-    );
-    if (existingCat) {
-      categoryId = existingCat.id;
-    } else {
-      const { data: newCat } = await supabase
-        .from('categories')
-        .insert({ store_id: storeId, name: categoryName })
-        .select()
-        .single();
-      categoryId = newCat?.id;
-    }
-
-    // 원본 저장 (manual_type: basic)
-    const { data: saved } = await supabase.from('manuals').insert({
-      store_id:         storeId,
-      category_id:      categoryId,
-      title,
-      content:          organizedContent,
-      original_content: content,
-      is_chunk:         false,
-      manual_type:      'basic'
-    }).select().single();
-
-    // 청크 + 임베딩
-    const chunks = splitIntoChunks(organizedContent);
-    for (const chunk of chunks) {
-      const embRes = await openai.embeddings.create({
-        model: 'text-embedding-3-small',
-        input: chunk
+          },
+          { role: 'user', content: chunk }
+        ],
+        max_tokens: 2000,
+        temperature: 0.2
       });
-      await supabase.from('manuals').insert({
-        store_id:    storeId,
-        category_id: categoryId,
+
+      let categoryName = '기초';
+      let title = '기초 매뉴얼';
+      let organizedContent = chunk;
+
+      try {
+        const parsed = JSON.parse(organized.choices[0].message.content);
+        categoryName   = parsed.category || '기초';
+        title          = parsed.title    || '기초 매뉴얼';
+        organizedContent = parsed.content || chunk;
+      } catch {
+        organizedContent = chunk;
+      }
+
+      let categoryId = null;
+      const existingCat = categories?.find(
+        c => c.name.toLowerCase() === categoryName.toLowerCase()
+      );
+      if (existingCat) {
+        categoryId = existingCat.id;
+      } else {
+        const { data: newCat } = await supabase
+          .from('categories')
+          .insert({ store_id: storeId, name: categoryName })
+          .select()
+          .single();
+        categoryId = newCat?.id;
+      }
+
+      const { data: saved } = await supabase.from('manuals').insert({
+        store_id:         storeId,
+        category_id:      categoryId,
         title,
-        content:     chunk,
-        is_chunk:    true,
-        manual_type: 'basic',
-        embedding:   embRes.data[0].embedding
-      });
+        content:          organizedContent,
+        original_content: chunk,
+        is_chunk:         false,
+        manual_type:      'basic'
+      }).select().single();
+
+      // 임베딩
+      const embChunks = splitIntoChunks(organizedContent);
+      for (const embChunk of embChunks) {
+        const embRes = await openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: embChunk
+        });
+        await supabase.from('manuals').insert({
+          store_id:    storeId,
+          category_id: categoryId,
+          title,
+          content:     embChunk,
+          is_chunk:    true,
+          manual_type: 'basic',
+          embedding:   embRes.data[0].embedding
+        });
+      }
     }
 
     await reanswerPending(storeId);
-    res.json({ ok: true, title, manualId: saved.id });
+    res.json({ ok: true });
 
   } catch (err) {
     console.error('[basic manual error]', err.message);
-    res.status(500).json({ error: '저장 실패' });
+    res.status(500).json({ error: '저장 실패: ' + err.message });
   }
 });
 
