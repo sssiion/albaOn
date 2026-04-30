@@ -16,7 +16,7 @@ router.get('/:inviteCode', async (req, res) => {
 });
 
 // 초대 수락 — 알바생이 매장에 합류
-router.post('/:inviteCode/join', auth, async (req, res) => {
+router.post('/:inviteCode/join',  async (req, res) => {
   // 매장 찾기
   const { data: store, error: storeErr } = await supabase
     .from('stores')
