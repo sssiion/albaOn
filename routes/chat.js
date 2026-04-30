@@ -16,7 +16,7 @@ const groq = new OpenAI({
 });
 
 // 채팅 (알바생이 질문)
-router.post('/:storeId', auth, async (req, res) => {
+router.post('/:storeId', async (req, res) => {
   const { storeId } = req.params;
   const { question } = req.body;
 
