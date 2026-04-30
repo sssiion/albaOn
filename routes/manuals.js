@@ -6,12 +6,14 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const { supabase } = require('../lib/supabase');
 const OpenAI = require('openai');
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 
 // 업로드 폴더 생성
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+
+
 
 // multer 설정
 const upload = multer({
@@ -45,6 +47,91 @@ function splitIntoChunks(text, size = 500) {
   }
   if (current.trim()) chunks.push(current.trim());
   return chunks.filter(c => c.length > 10);
+}
+
+// Groq 초기화 (파일 상단에 추가)
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: 'https://api.groq.com/openai/v1'
+});
+
+// 미답변 질문 자동 재답변
+async function reanswerPending(storeId) {
+  try {
+    // 미답변 질문 전체 조회
+    const { data: pendingLogs } = await supabase
+      .from('chat_logs')
+      .select('id, question')
+      .eq('store_id', storeId)
+      .eq('is_answered', false);
+
+    if (!pendingLogs || pendingLogs.length === 0) return;
+
+    console.log(`[reanswer] 미답변 ${pendingLogs.length}개 처리 중...`);
+
+    for (const log of pendingLogs) {
+      try {
+        // 임베딩 생성
+        const embRes = await openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: log.question
+        });
+
+        // 유사 매뉴얼 검색
+        const { data: chunks } = await supabase.rpc('match_manuals', {
+          query_embedding: embRes.data[0].embedding,
+          store_id_param:  storeId,
+          match_count:     5
+        });
+
+        const context = chunks?.map(c => c.content).join('\n\n') || '';
+
+        // 매뉴얼이 없으면 스킵
+        if (!context) continue;
+
+        // Groq 답변 생성
+        const completion = await groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            {
+              role: 'system',
+              content: `편의점 알바생을 도와주는 AI 도우미예요.
+매장 매뉴얼을 참고해서 짧고 명확하게 답변해주세요.
+매뉴얼에 없는 내용은 "매뉴얼에 없는 내용이에요"라고 답하세요.
+
+[매장 매뉴얼]
+${context}`
+            },
+            { role: 'user', content: log.question }
+          ],
+          max_tokens: 400,
+          temperature: 0.3
+        });
+
+        const answer = completion.choices[0].message.content;
+        const isAnswered = !answer.includes('매뉴얼에 없는 내용');
+
+        // 답변이 됐을 때만 업데이트
+        if (isAnswered) {
+          await supabase
+            .from('chat_logs')
+            .update({ answer, is_answered: true })
+            .eq('id', log.id);
+
+          console.log(`[reanswer] 질문 해결: ${log.question.slice(0, 30)}...`);
+        }
+
+      } catch (err) {
+        console.error(`[reanswer] 개별 오류:`, err.message);
+        continue; // 하나 실패해도 계속 진행
+      }
+    }
+
+    console.log('[reanswer] 완료');
+
+  } catch (err) {
+    console.error('[reanswer] 전체 오류:', err.message);
+  }
 }
 
 // ── 매뉴얼 목록 조회 (원본만) ──────────────────
