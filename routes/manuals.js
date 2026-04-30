@@ -356,7 +356,7 @@ JSON만 출력하세요.`
     // 원본 업데이트
     await supabase
       .from('manuals')
-      .update({ content: organizedContent, original_content: content })
+      .update({ content: organizedContent })  // original_content 건드리지 않음
       .eq('id', manualId);
 
     // 기존 청크 삭제
