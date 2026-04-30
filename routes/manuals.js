@@ -300,7 +300,7 @@ router.patch('/:storeId/:manualId/category', auth, async (req, res) => {
 });
 
 // ── 매뉴얼 수정 ────────────────────────────────
-router.put('/:manualId', auth, async (req, res) => {
+router.put('/edit/:manualId', auth, async (req, res) => {
   const { content } = req.body;
   const { manualId } = req.params;
 
