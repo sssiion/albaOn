@@ -148,7 +148,6 @@ router.get('/:storeId', auth, async (req, res) => {
 });
 
 // ── 매뉴얼 저장 ────────────────────────────────
-// ── 매뉴얼 저장 ────────────────────────────────
 router.post('/:storeId', auth, async (req, res) => {
   const { content } = req.body;
   const { storeId } = req.params;
@@ -156,32 +155,36 @@ router.post('/:storeId', auth, async (req, res) => {
   if (!content) return res.status(400).json({ error: '내용 필수' });
 
   try {
-    // 1. GPT로 정리
+    // 1. 현재 카테고리 목록 조회
+    const { data: categories } = await supabase
+      .from('categories')
+      .select('id, name')
+      .eq('store_id', storeId)
+      .order('order_num', { ascending: true });
+
+    const categoryList = categories?.map(c => c.name).join(', ') || '';
+
+    // 2. GPT로 정리 + 카테고리 분류
     const organized = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-         content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
-아래 텍스트를 표준 카테고리에 맞게 정리해주세요.
+          content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
+아래 텍스트를 카테고리별로 정리해주세요.
 
-편의점 표준 카테고리:
-- 청소 (쓰레기 처리, 바닥청소, 화장실청소 등)
-- POS 사용법 (결제, 환불, 영수증 등)
-- 담배 관리 (위치, 재고, 판매 등)
-- 폐기 절차 (유통기한, 폐기 시간 등)
-- 오픈/마감 (체크리스트, 절차 등)
-- 발주/재고 (발주 방법, 재고 확인 등)
-- 비상 대응 (단말기 오류, 도난, 취객 등)
-- 기타
-
-위 카테고리 중 가장 적합한 곳에 분류해주세요.
-하위 항목은 구체적으로 작성해주세요.
+${categoryList
+  ? `현재 등록된 카테고리: ${categoryList}
+위 카테고리 중 가장 적합한 것을 선택해주세요.
+없으면 새로운 카테고리명을 만들어주세요.`
+  : `적합한 카테고리명을 만들어주세요. (예: 청소, POS 사용법, 담배 관리 등)`
+}
 
 출력 형식 (JSON):
 {
-  "title": "카테고리명 > 세부항목명",
-  "content": "## 대카테고리\\n### 중카테고리\\n- 세부내용"
+  "category": "카테고리명",
+  "title": "세부 항목명",
+  "content": "## 중분류\\n- 내용\\n\\n### 소분류\\n- 내용"
 }
 
 JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
@@ -192,27 +195,48 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
       temperature: 0.2
     });
 
+    let categoryName = '기타';
     let title = '매뉴얼';
     let organizedContent = content;
 
     try {
       const parsed = JSON.parse(organized.choices[0].message.content);
-      title = parsed.title || '매뉴얼';
+      categoryName   = parsed.category || '기타';
+      title          = parsed.title    || '매뉴얼';
       organizedContent = parsed.content || content;
     } catch {
       organizedContent = content;
     }
 
-    // 2. 원본 저장
+    // 3. 카테고리 찾거나 생성
+    let categoryId = null;
+    const existingCat = categories?.find(
+      c => c.name.toLowerCase() === categoryName.toLowerCase()
+    );
+
+    if (existingCat) {
+      categoryId = existingCat.id;
+    } else {
+      // 새 카테고리 생성
+      const { data: newCat } = await supabase
+        .from('categories')
+        .insert({ store_id: storeId, name: categoryName })
+        .select()
+        .single();
+      categoryId = newCat?.id;
+    }
+
+    // 4. 원본 저장
     await supabase.from('manuals').insert({
       store_id:         storeId,
+      category_id:      categoryId,
       title,
       content:          organizedContent,
       original_content: content,
       is_chunk:         false
     });
 
-    // 3. 청크 + 임베딩 저장
+    // 5. 청크 + 임베딩 저장
     const chunks = splitIntoChunks(organizedContent);
     for (const chunk of chunks) {
       const embRes = await openai.embeddings.create({
@@ -220,23 +244,39 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
         input: chunk
       });
       await supabase.from('manuals').insert({
-        store_id:  storeId,
+        store_id:    storeId,
+        category_id: categoryId,
         title,
-        content:   chunk,
-        is_chunk:  true,
-        embedding: embRes.data[0].embedding
+        content:     chunk,
+        is_chunk:    true,
+        embedding:   embRes.data[0].embedding
       });
     }
 
-    // 4. 미답변 질문 자동 재답변
+    // 6. 미답변 재처리
     await reanswerPending(storeId);
 
-    res.json({ ok: true, title, organizedContent });
+    res.json({ ok: true, title, categoryName, organizedContent });
 
   } catch (err) {
     console.error('[manual error]', err.message);
     res.status(500).json({ error: '매뉴얼 저장 실패' });
   }
+});
+
+// 매뉴얼 카테고리 이동
+router.patch('/:storeId/:manualId/category', auth, async (req, res) => {
+  const { categoryId } = req.body;
+  const { storeId, manualId } = req.params;
+
+  const { error } = await supabase
+    .from('manuals')
+    .update({ category_id: categoryId })
+    .eq('id', manualId)
+    .eq('store_id', storeId);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
 });
 
 // ── 매뉴얼 수정 ────────────────────────────────
