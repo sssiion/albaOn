@@ -71,5 +71,63 @@ router.delete('/:mediaId', auth, async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });
+// 이미지 업로드
+router.post('/:manualId', auth, upload.single('file'), async (req, res) => {
+  const { manualId } = req.params;
+  const { caption, type, url } = req.body;
 
+  try {
+    // 영상 URL인 경우 파일 없이 바로 저장
+    if (type === 'video' && url) {
+      const { data, error } = await supabase
+        .from('manual_media')
+        .insert({
+          manual_id: manualId,
+          type:      'video',
+          url,
+          caption:   caption || ''
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      return res.json(data);
+    }
+
+    // 이미지 파일 업로드
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: '파일 필수' });
+
+    const ext      = file.originalname.split('.').pop();
+    const fileName = `${manualId}/${Date.now()}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('manual-media')
+      .upload(fileName, file.buffer, { contentType: file.mimetype });
+
+    if (uploadError) throw uploadError;
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('manual-media')
+      .getPublicUrl(fileName);
+
+    const { data, error } = await supabase
+      .from('manual_media')
+      .insert({
+        manual_id: manualId,
+        type:      'image',
+        url:       publicUrl,
+        caption:   caption || ''
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+
+  } catch (err) {
+    console.error('[media upload error]', err.message);
+    res.status(500).json({ error: '업로드 실패' });
+  }
+});
 module.exports = router;
