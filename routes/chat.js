@@ -40,7 +40,7 @@ router.post('/:storeId', async (req, res) => {
     const context = chunks?.map(c => c.content).join('\n\n') || '';
 
     // 3. GPT 답변 생성
-    const completion = await openai.groq.completions.create({
+    const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [
         {
