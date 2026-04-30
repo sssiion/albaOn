@@ -304,7 +304,7 @@ router.put('/edit/:manualId', auth, async (req, res) => {
   const { content } = req.body;
   const { manualId } = req.params;
 
-  if (!content) return res.status(400).json({ error: '내용 필수' });
+ const newContent = content ?? '';
 
   try {
     const { data: original } = await supabase
