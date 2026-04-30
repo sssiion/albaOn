@@ -4,7 +4,16 @@ const auth = require('../middleware/auth');
 const { supabase } = require('../lib/supabase');
 const OpenAI = require('openai');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// 임베딩용 (OpenAI)
+const openai = new OpenAI({ 
+  apiKey: process.env.OPENAI_API_KEY 
+});
+
+// 채팅용 (Groq - 무료)
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: 'https://api.groq.com/openai/v1'
+});
 
 // 채팅 (알바생이 질문)
 router.post('/:storeId', auth, async (req, res) => {
@@ -32,7 +41,7 @@ router.post('/:storeId', auth, async (req, res) => {
 
     // 3. GPT 답변 생성
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'llama-3.3-70b-versatile',
       messages: [
         {
           role: 'system',
