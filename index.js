@@ -13,6 +13,7 @@ app.use('/api/manuals', require('./routes/manuals'));
 app.use('/api/chat',    require('./routes/chat'));
 app.use('/api/invite',  require('./routes/invite'));
 app.use('/api/categories', require('./routes/categories'));
+app.use('/api/media', require('./routes/media'));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
