@@ -63,41 +63,93 @@ router.get('/:storeId', auth, async (req, res) => {
 
 // 매뉴얼 저장 + 임베딩 생성
 router.post('/:storeId', auth, async (req, res) => {
-  const { title, content } = req.body;
+  const { content } = req.body;
   const { storeId } = req.params;
 
   if (!content) return res.status(400).json({ error: '내용 필수' });
 
   try {
-    // 청크 분할
-    const chunks = splitIntoChunks(content);
-    const saved = [];
+    // 1. GPT로 정리
+    const organized = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
+아래 텍스트를 카테고리별로 정리해주세요.
 
+출력 형식 (JSON):
+{
+  "title": "전체 내용을 대표하는 짧은 제목",
+  "content": "## 카테고리1\\n- 내용\\n\\n## 카테고리2\\n- 내용"
+}
+
+JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
+        },
+        { role: 'user', content }
+      ],
+      max_tokens: 1000,
+      temperature: 0.2
+    });
+
+    let title = '매뉴얼';
+    let organizedContent = content;
+
+    try {
+      const parsed = JSON.parse(organized.choices[0].message.content);
+      title = parsed.title || '매뉴얼';
+      organizedContent = parsed.content || content;
+    } catch {
+      organizedContent = content;
+    }
+
+    // 2. 원본 통째로 저장 (is_chunk: false)
+    const { data: originalDoc } = await supabase
+      .from('manuals')
+      .insert({
+        store_id:         storeId,
+        title,
+        content:          organizedContent,
+        original_content: content,
+        is_chunk:         false
+      })
+      .select()
+      .single();
+
+    // 3. 청크 분할 + 임베딩 저장 (is_chunk: true)
+    const chunks = splitIntoChunks(organizedContent);
     for (const chunk of chunks) {
-      // 임베딩 생성
       const embRes = await openai.embeddings.create({
         model: 'text-embedding-3-small',
         input: chunk
       });
-      const embedding = embRes.data[0].embedding;
-
-      // DB 저장
-      const { data, error } = await supabase
-        .from('manuals')
-        .insert({ store_id: storeId, title, content: chunk, embedding })
-        .select()
-        .single();
-
-      if (error) throw error;
-      saved.push(data);
+      await supabase.from('manuals').insert({
+        store_id:  storeId,
+        title,
+        content:   chunk,
+        is_chunk:  true,
+        embedding: embRes.data[0].embedding
+      });
     }
 
-    res.json({ ok: true, count: saved.length, chunks: saved });
+    res.json({ ok: true, title, organizedContent });
 
   } catch (err) {
-    console.error('[manual embed error]', err.message);
-    res.status(500).json({ error: '임베딩 생성 실패' });
+    console.error('[manual error]', err.message);
+    res.status(500).json({ error: '매뉴얼 저장 실패' });
   }
+});
+// 매뉴얼 목록 조회 (원본만)
+router.get('/:storeId', auth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('manuals')
+    .select('id, title, content, original_content, created_at')
+    .eq('store_id', req.params.storeId)
+    .eq('is_chunk', false)  // 원본만 조회
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
 
 // 매뉴얼 삭제
@@ -246,6 +298,52 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
   } catch (err) {
     console.error('[manual error]', err.message);
     res.status(500).json({ error: '매뉴얼 저장 실패' });
+  }
+});
+// 매뉴얼 수정
+router.put('/:storeId/:manualId', auth, async (req, res) => {
+  const { content } = req.body;
+  const { storeId, manualId } = req.params;
+
+  if (!content) return res.status(400).json({ error: '내용 필수' });
+
+  try {
+    // 1. 원본 업데이트
+    await supabase
+      .from('manuals')
+      .update({ content, original_content: content })
+      .eq('id', manualId)
+      .eq('store_id', storeId);
+
+    // 2. 기존 청크 삭제
+    await supabase
+      .from('manuals')
+      .delete()
+      .eq('store_id', storeId)
+      .eq('title', (await supabase.from('manuals').select('title').eq('id', manualId).single()).data.title)
+      .eq('is_chunk', true);
+
+    // 3. 새 청크 + 임베딩 생성
+    const chunks = splitIntoChunks(content);
+    for (const chunk of chunks) {
+      const embRes = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: chunk
+      });
+      await supabase.from('manuals').insert({
+        store_id:  storeId,
+        title:     req.body.title || '매뉴얼',
+        content:   chunk,
+        is_chunk:  true,
+        embedding: embRes.data[0].embedding
+      });
+    }
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.error('[manual update error]', err.message);
+    res.status(500).json({ error: '수정 실패' });
   }
 });
 
