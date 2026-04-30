@@ -307,59 +307,19 @@ router.put('/edit/:manualId', auth, async (req, res) => {
   if (!content) return res.status(400).json({ error: '내용 필수' });
 
   try {
-    // 수정할 매뉴얼 조회
     const { data: original } = await supabase
       .from('manuals')
       .select('title, store_id')
       .eq('id', manualId)
       .single();
 
-    // GPT로 재정리
-    const organized = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
-아래 텍스트를 최대한 상세하고 구체적으로 정리해주세요.
-
-규칙:
-1. 하나의 내용도 여러 항목으로 세분화해서 작성해요
-2. 절차가 있으면 순서대로 나눠요
-3. 위치, 방법, 주의사항을 각각 별도 항목으로 작성해요
-4. 최소 3개 이상의 세부 항목으로 나눠요
-
-출력 형식 (JSON):
-{
-  "title": "제목",
-  "content": "## 중분류\\n### 소분류\\n- 내용"
-}
-JSON만 출력하세요.`
-        },
-        { role: 'user', content }
-      ],
-      max_tokens: 1000,
-      temperature: 0.2
-    });
-
-    let title = original.title;
-    let organizedContent = content;
-
-    try {
-      const parsed = JSON.parse(organized.choices[0].message.content);
-      title = parsed.title || original.title;
-      organizedContent = parsed.content || content;
-    } catch {
-      organizedContent = content;
-    }
-
-    // 원본 업데이트
+    // 그냥 content만 업데이트 (AI 재정리 없음)
     await supabase
       .from('manuals')
-      .update({ content: organizedContent })  // original_content 건드리지 않음
+      .update({ content })
       .eq('id', manualId);
 
-    // 기존 청크 삭제
+    // 기존 청크 삭제 후 새로 임베딩만 생성
     await supabase
       .from('manuals')
       .delete()
@@ -367,8 +327,7 @@ JSON만 출력하세요.`
       .eq('title', original.title)
       .eq('is_chunk', true);
 
-    // 새 청크 + 임베딩
-    const chunks = splitIntoChunks(organizedContent);
+    const chunks = splitIntoChunks(content);
     for (const chunk of chunks) {
       const embRes = await openai.embeddings.create({
         model: 'text-embedding-3-small',
@@ -376,17 +335,14 @@ JSON만 출력하세요.`
       });
       await supabase.from('manuals').insert({
         store_id:  original.store_id,
-        title,
+        title:     original.title,
         content:   chunk,
         is_chunk:  true,
         embedding: embRes.data[0].embedding
       });
     }
 
-    // 미답변 재처리
-    await reanswerPending(original.store_id);
-
-    res.json({ ok: true, title, organizedContent });
+    res.json({ ok: true });
 
   } catch (err) {
     console.error('[manual update error]', err.message);
