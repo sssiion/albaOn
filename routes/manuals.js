@@ -130,7 +130,7 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
 
     // 2. GPT-4o-mini — 텍스트 → 카테고리별 매뉴얼 정리
     const organized = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'llama-3.3-70b-versatile',
       messages: [
         {
           role: 'system',
