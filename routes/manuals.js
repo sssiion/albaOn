@@ -138,7 +138,7 @@ ${context}`
 router.get('/:storeId', auth, async (req, res) => {
   const { data, error } = await supabase
     .from('manuals')
-    .select('id, title, content, original_content, created_at')
+    .select('id, title, content, original_content, category_id, created_at') // category_id 추가
     .eq('store_id', req.params.storeId)
     .eq('is_chunk', false)
     .order('created_at', { ascending: false });
