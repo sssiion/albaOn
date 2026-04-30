@@ -97,5 +97,88 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
 
   res.json(user);
 });
+// 회원가입
+router.post('/register', async (req, res) => {
+  const { name, pin } = req.body;
 
+  if (!name || !pin || pin.length !== 4) {
+    return res.status(400).json({ error: '이름과 PIN 4자리 필수' });
+  }
+
+  try {
+    // 이름 중복 확인
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id')
+      .eq('name', name.trim())
+      .eq('provider', 'pin')
+      .single();
+
+    if (existing) {
+      return res.status(400).json({ error: '이미 사용 중인 이름이에요' });
+    }
+
+    // 계정 생성
+    const { data: user, error } = await supabase
+      .from('users')
+      .insert({
+        provider:    'pin',
+        provider_id: `${name.trim()}_${pin}`,
+        name:        name.trim(),
+        role:        'owner'
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // JWT 발급
+    const token = jwt.sign(
+      { userId: user.id, name: user.name },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({ token, user: { id: user.id, name: user.name } });
+
+  } catch (err) {
+    console.error('[register error]', err.message);
+    res.status(500).json({ error: '회원가입 실패' });
+  }
+});
+
+// 로그인
+router.post('/login', async (req, res) => {
+  const { name, pin } = req.body;
+
+  if (!name || !pin) {
+    return res.status(400).json({ error: '이름과 PIN 필수' });
+  }
+
+  try {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('name', name.trim())
+      .eq('provider', 'pin')
+      .eq('provider_id', `${name.trim()}_${pin}`)
+      .single();
+
+    if (error || !user) {
+      return res.status(401).json({ error: '이름 또는 PIN이 틀렸어요' });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, name: user.name },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({ token, user: { id: user.id, name: user.name } });
+
+  } catch (err) {
+    console.error('[login error]', err.message);
+    res.status(500).json({ error: '로그인 실패' });
+  }
+});
 module.exports = router;
