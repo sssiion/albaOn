@@ -271,7 +271,8 @@ router.put('/:storeId/:manualId', auth, async (req, res) => {
         embedding: embRes.data[0].embedding
       });
     }
-
+    //수정 후 미답변 재처리
+    await reanswerPending(storeId);
     res.json({ ok: true });
 
   } catch (err) {
