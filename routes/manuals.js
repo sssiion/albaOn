@@ -387,25 +387,15 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
 
   if (!file) return res.status(400).json({ error: '파일 필수' });
 
-  // 확장자 추출 후 파일 이름 변경
   const ext = file.originalname.split('.').pop().toLowerCase();
   const newPath = file.path + '.' + ext;
-  console.log('[whisper] originalname:', file.originalname);
-  console.log('[whisper] ext:', ext);
-  console.log('[whisper] newPath:', newPath);
-  console.log('[whisper] mimetype:', file.mimetype);
   fs.renameSync(file.path, newPath);
 
   try {
-    const audioFile = await toFile(
-      fs.createReadStream(newPath),
-      `audio.m4a`,
-      { type: 'audio/m4a' }
-    );
-    
-    const transcription = await openai.audio.transcriptions.create({
-      file: audioFile,
-      model: 'whisper-1',
+    const audioStream = fs.createReadStream(newPath);
+    const transcription = await groq.audio.transcriptions.create({
+      file: audioStream,
+      model: 'whisper-large-v3',
       language: 'ko'
     });
     const rawText = transcription.text;
@@ -419,7 +409,6 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
     res.status(500).json({ error: 'STT 변환 실패: ' + err.message });
   }
 });
-
 // 기초 매뉴얼 저장
 router.post('/:storeId/basic', auth, async (req, res) => {
   const { content } = req.body;
