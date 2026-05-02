@@ -430,6 +430,7 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
     });
 
     const organizedText = organized.choices[0].message.content;
+    console.log('[upload] organizedText:', organizedText?.slice(0, 100));
 
     res.json({ rawText, organizedText, ok: true });
 
