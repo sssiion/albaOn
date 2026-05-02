@@ -574,5 +574,19 @@ router.get('/:storeId/basic', auth, async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
+router.get('/:storeId', auth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('manuals')
+    .select(`
+      id, title, content, original_content, category_id, created_at,
+      manual_node_media(id, node_label, url, caption)
+    `)
+    .eq('store_id', req.params.storeId)
+    .eq('is_chunk', false)
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
 
 module.exports = router;
