@@ -8,8 +8,8 @@ const { supabase } = require('../lib/supabase');
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-
+const Groq = require('groq-sdk');
+const groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
 // 업로드 폴더 생성
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
@@ -393,11 +393,11 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
 
   try {
     const audioStream = fs.createReadStream(newPath);
-    const transcription = await groq.audio.transcriptions.create({
-      file: audioStream,
-      model: 'whisper-large-v3',
-      language: 'ko'
-    });
+    const transcription = await groqClient.audio.transcriptions.create({
+        file: audioStream,
+        model: 'whisper-large-v3',
+        language: 'ko'
+      });
     const rawText = transcription.text;
     fs.unlinkSync(newPath);
 
