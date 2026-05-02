@@ -386,20 +386,25 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
 
   if (!file) return res.status(400).json({ error: '파일 필수' });
 
+  // 확장자 추출 후 파일 이름 변경
+  const ext = file.originalname.split('.').pop().toLowerCase();
+  const newPath = file.path + '.' + ext;
+  fs.renameSync(file.path, newPath);
+
   try {
-    const audioStream = fs.createReadStream(file.path);
+    const audioStream = fs.createReadStream(newPath);
     const transcription = await openai.audio.transcriptions.create({
       file: audioStream,
       model: 'whisper-1',
       language: 'ko'
     });
     const rawText = transcription.text;
-    fs.unlinkSync(file.path);
+    fs.unlinkSync(newPath);
 
     res.json({ rawText, ok: true });
 
   } catch (err) {
-    if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
     console.error('[whisper error]', err.message);
     res.status(500).json({ error: 'STT 변환 실패: ' + err.message });
   }
