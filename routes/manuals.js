@@ -389,6 +389,10 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
   // 확장자 추출 후 파일 이름 변경
   const ext = file.originalname.split('.').pop().toLowerCase();
   const newPath = file.path + '.' + ext;
+  console.log('[whisper] originalname:', file.originalname);
+  console.log('[whisper] ext:', ext);
+  console.log('[whisper] newPath:', newPath);
+  console.log('[whisper] mimetype:', file.mimetype);
   fs.renameSync(file.path, newPath);
 
   try {
