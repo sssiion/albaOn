@@ -6,6 +6,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const { supabase } = require('../lib/supabase');
 const OpenAI = require('openai');
+const { toFile } = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 
@@ -396,9 +397,14 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
   fs.renameSync(file.path, newPath);
 
   try {
-    const audioStream = fs.createReadStream(newPath);
+    const audioFile = await toFile(
+      fs.createReadStream(newPath),
+      `audio.m4a`,
+      { type: 'audio/m4a' }
+    );
+    
     const transcription = await openai.audio.transcriptions.create({
-      file: audioStream,
+      file: audioFile,
       model: 'whisper-1',
       language: 'ko'
     });
