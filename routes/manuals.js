@@ -392,16 +392,46 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
   fs.renameSync(file.path, newPath);
 
   try {
+    // 1. STT 변환
     const audioStream = fs.createReadStream(newPath);
     const transcription = await groqClient.audio.transcriptions.create({
-        file: audioStream,
-        model: 'whisper-large-v3',
-        language: 'ko'
-      });
+      file: audioStream,
+      model: 'whisper-large-v3',
+      language: 'ko'
+    });
     const rawText = transcription.text;
     fs.unlinkSync(newPath);
 
-    res.json({ rawText, ok: true });
+    // 2. GPT로 정리
+    const organized = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
+아래 음성 인식 텍스트를 매뉴얼로 정리해주세요.
+
+규칙:
+1. 입력된 내용에 없는 정보는 절대 추가하지 마세요
+2. 절차가 있으면 순서대로 나눠요
+3. 최소 3개 이상의 세부 항목으로 나눠요
+
+출력 형식:
+## 중분류
+### 소분류
+- 내용
+
+마크다운 텍스트만 출력하세요.`
+        },
+        { role: 'user', content: rawText }
+      ],
+      max_tokens: 2000,
+      temperature: 0.2
+    });
+
+    const organizedText = organized.choices[0].message.content;
+
+    res.json({ rawText, organizedText, ok: true });
 
   } catch (err) {
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
