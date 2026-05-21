@@ -6,15 +6,16 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const { supabase } = require('../lib/supabase');
 const OpenAI = require('openai');
-const { toFile } = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const Groq = require('groq-sdk');
 const groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// 🔴 수정 1: PROMPTS import 추가 (기존 코드에 없었음)
+const { PROMPTS } = require('./prompts');
+
 // 업로드 폴더 생성
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-
-
 
 // multer 설정
 const upload = multer({
@@ -33,33 +34,55 @@ const upload = multer({
   }
 });
 
-// 청크 분할
-function splitIntoChunks(text, size = 500) {
-  const chunks = [];
-  const sentences = text.split(/(?<=[.!?。\n])\s*/);
-  let current = '';
-  for (const sentence of sentences) {
-    if ((current + sentence).length > size && current) {
-      chunks.push(current.trim());
-      current = sentence;
-    } else {
-      current += sentence + ' ';
-    }
+// ── 유틸 함수 ───────────────────────────────────
+function parseAskResponse(raw = '') {
+  try {
+    const clean = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    const questions = parsed.questions || [];
+    return { questions, enough: questions.length === 0 };
+  } catch {
+    return { questions: [], enough: true };
   }
-  if (current.trim()) chunks.push(current.trim());
-  return chunks.filter(c => c.length > 10);
 }
 
-// Groq 초기화 (파일 상단에 추가)
+function splitIntoItems(items = []) {
+  return items
+    .filter(item => item.title && item.content)
+    .map(item => `${item.title}: ${item.content}`.trim())
+    .filter(chunk => chunk.length > 5);
+}
+
+function parseOrganizeResponse(raw = '', fallback = '') {
+  try {
+    const clean = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    const items = parsed.items || [];
+    return {
+      category: parsed.category || '기타',
+      title:    parsed.title    || '매뉴얼',
+      items,
+      chunks:   splitIntoItems(items),
+    };
+  } catch {
+    return {
+      category: '기타',
+      title:    '매뉴얼',
+      items:    [],
+      chunks:   fallback ? [fallback] : [],
+    };
+  }
+}
+
+// Groq (LLM용)
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY,
   baseURL: 'https://api.groq.com/openai/v1'
 });
 
-// 미답변 질문 자동 재답변
+// ── 미답변 질문 자동 재답변 ──────────────────────
 async function reanswerPending(storeId) {
   try {
-    // 미답변 질문 전체 조회
     const { data: pendingLogs } = await supabase
       .from('chat_logs')
       .select('id, question')
@@ -72,13 +95,11 @@ async function reanswerPending(storeId) {
 
     for (const log of pendingLogs) {
       try {
-        // 임베딩 생성
         const embRes = await openai.embeddings.create({
           model: 'text-embedding-3-small',
           input: log.question
         });
 
-        // 유사 매뉴얼 검색
         const { data: chunks } = await supabase.rpc('match_manuals', {
           query_embedding: embRes.data[0].embedding,
           store_id_param:  storeId,
@@ -86,24 +107,13 @@ async function reanswerPending(storeId) {
         });
 
         const context = chunks?.map(c => c.content).join('\n\n') || '';
-
-        // 매뉴얼이 없으면 스킵
         if (!context) continue;
 
-        // Groq 답변 생성
         const completion = await groq.chat.completions.create({
           model: 'llama-3.3-70b-versatile',
           messages: [
-            {
-              role: 'system',
-              content: `편의점 알바생을 도와주는 AI 도우미예요.
-매장 매뉴얼을 참고해서 짧고 명확하게 답변해주세요.
-매뉴얼에 없는 내용은 "매뉴얼에 없는 내용이에요"라고 답하세요.
-
-[매장 매뉴얼]
-${context}`
-            },
-            { role: 'user', content: log.question }
+            { role: 'system', content: PROMPTS.CHAT_ANSWER({ context }) },
+            { role: 'user',   content: log.question }
           ],
           max_tokens: 400,
           temperature: 0.3
@@ -112,34 +122,32 @@ ${context}`
         const answer = completion.choices[0].message.content;
         const isAnswered = !answer.includes('매뉴얼에 없는 내용');
 
-        // 답변이 됐을 때만 업데이트
         if (isAnswered) {
           await supabase
             .from('chat_logs')
             .update({ answer, is_answered: true })
             .eq('id', log.id);
-
-          console.log(`[reanswer] 질문 해결: ${log.question.slice(0, 30)}...`);
         }
-
       } catch (err) {
         console.error(`[reanswer] 개별 오류:`, err.message);
-        continue; // 하나 실패해도 계속 진행
+        continue;
       }
     }
-
     console.log('[reanswer] 완료');
-
   } catch (err) {
     console.error('[reanswer] 전체 오류:', err.message);
   }
 }
 
-// ── 매뉴얼 목록 조회 (원본만) ──────────────────
+// ── 매뉴얼 목록 조회 ────────────────────────────
+// 🔴 수정 2: GET /:storeId 가 두 개 있었음 → 아래쪽 하나로 통합 (manual_node_media 포함)
 router.get('/:storeId', auth, async (req, res) => {
   const { data, error } = await supabase
     .from('manuals')
-    .select('id, title, content, original_content, category_id, created_at') // category_id 추가
+    .select(`
+      id, title, content, original_content, category_id, created_at,
+      manual_node_media(id, node_label, url, caption)
+    `)
     .eq('store_id', req.params.storeId)
     .eq('is_chunk', false)
     .order('created_at', { ascending: false });
@@ -148,15 +156,45 @@ router.get('/:storeId', auth, async (req, res) => {
   res.json(data);
 });
 
-// ── 매뉴얼 저장 ────────────────────────────────
+// ── POST /:storeId/ask — 보완 질문 생성 ─────────
+// 🔴 순서 중요: /:storeId 보다 반드시 위에 있어야 함
+router.post('/:storeId/ask', auth, async (req, res) => {
+  const { storeId } = req.params;
+  const { content, bizType = '매장' } = req.body;
+
+  if (!content) return res.status(400).json({ error: '내용 필수' });
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: PROMPTS.MANUAL_ASK({ bizType, content }) },
+        { role: 'user',   content }
+      ],
+      max_tokens: 300,
+      temperature: 0.2
+    });
+
+    const raw = completion.choices[0].message.content;
+    const { questions, enough } = parseAskResponse(raw);
+
+    res.json({ needsMore: !enough, questions });
+
+  } catch (err) {
+    console.error('[ask error]', err.message);
+    res.json({ needsMore: false, questions: [] });
+  }
+});
+
+// ── 매뉴얼 저장 ─────────────────────────────────
 router.post('/:storeId', auth, async (req, res) => {
-  const { content } = req.body;
+  // 🔴 수정 3: answers 도 받도록 추가 (보완 질문 답변)
+  const { content, bizType = '매장', answers = [] } = req.body;
   const { storeId } = req.params;
 
   if (!content) return res.status(400).json({ error: '내용 필수' });
 
   try {
-    // 1. 현재 카테고리 목록 조회
     const { data: categories } = await supabase
       .from('categories')
       .select('id, name')
@@ -165,52 +203,13 @@ router.post('/:storeId', auth, async (req, res) => {
 
     const categoryList = categories?.map(c => c.name).join(', ') || '';
 
-    // 2. GPT로 정리 + 카테고리 분류
+    // PROMPTS 사용 + answers 포함
     const organized = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-         content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
-아래 텍스트를 최대한 상세하고 구체적으로 정리해주세요.
-
-규칙:
-1. 하나의 내용도 여러 항목으로 세분화해서 작성해요
-2. 절차가 있으면 순서대로 나눠요
-3. 위치, 방법, 주의사항을 각각 별도 항목으로 작성해요
-4. 최소 3개 이상의 세부 항목으로 나눠요
-5. 모호한 내용은 구체적으로 풀어서 작성해요
-6. 입력된 내용에 없는 정보는 절대 추가하지 마세요  ← 추가
-7. 추측하거나 일반적인 상식을 추가하지 마세요   
-
-예시 입력: "쓰레기 버리는 봉투는 바구니 뒤에 있어"
-예시 출력:
-## 쓰레기 처리
-### 일반 쓰레기
-- 판매 중인 50L 쓰레기 봉투 사용
-- 봉투 가득 차면 즉시 교체
-### 분리수거
-- 전용 큰 비닐봉투 사용
-- 종류별로 분리해서 담기
-### 비닐봉투 위치
-- 바구니 모아놓은 곳 바로 뒤
-- 문 열면 안에 있음
-
-${categoryList
-  ? `현재 등록된 카테고리: ${categoryList}
-위 카테고리 중 가장 적합한 것을 선택해주세요.
-없으면 새로운 카테고리명을 만들어주세요.`
-  : `적합한 카테고리명을 만들어주세요. (예: 청소, POS 사용법, 담배 관리 등)`
-}
-
-출력 형식 (JSON):
-{
-  "category": "카테고리명",
-  "title": "세부 항목명",
-  "content": "## 중분류\\n### 소분류\\n- 내용"
-}
-
-JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
+          content: PROMPTS.MANUAL_ORGANIZE({ bizType, categoryList, content, answers })
         },
         { role: 'user', content }
       ],
@@ -218,29 +217,18 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
       temperature: 0.2
     });
 
-    let categoryName = '기타';
-    let title = '매뉴얼';
-    let organizedContent = content;
+    const raw = organized.choices[0].message.content;
+    // 🔴 수정 3 이어서: organizedContent 변수 제거, parseOrganizeResponse 로 통일
+    const { category: categoryName, title, chunks } = parseOrganizeResponse(raw, content);
 
-    try {
-      const parsed = JSON.parse(organized.choices[0].message.content);
-      categoryName   = parsed.category || '기타';
-      title          = parsed.title    || '매뉴얼';
-      organizedContent = parsed.content || content;
-    } catch {
-      organizedContent = content;
-    }
-
-    // 3. 카테고리 찾거나 생성
+    // 카테고리 찾거나 생성
     let categoryId = null;
     const existingCat = categories?.find(
       c => c.name.toLowerCase() === categoryName.toLowerCase()
     );
-
     if (existingCat) {
       categoryId = existingCat.id;
     } else {
-      // 새 카테고리 생성
       const { data: newCat } = await supabase
         .from('categories')
         .insert({ store_id: storeId, name: categoryName })
@@ -249,18 +237,17 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
       categoryId = newCat?.id;
     }
 
-    // 4. 원본 저장
+    // 원본 저장
     await supabase.from('manuals').insert({
       store_id:         storeId,
       category_id:      categoryId,
       title,
-      content:          organizedContent,
+      content:          chunks.join('\n'),  // items 합쳐서 저장
       original_content: content,
       is_chunk:         false
     });
 
-    // 5. 청크 + 임베딩 저장
-    const chunks = splitIntoChunks(organizedContent);
+    // 청크 + 임베딩 저장
     for (const chunk of chunks) {
       const embRes = await openai.embeddings.create({
         model: 'text-embedding-3-small',
@@ -276,10 +263,8 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
       });
     }
 
-    // 6. 미답변 재처리
     await reanswerPending(storeId);
-
-    res.json({ ok: true, title, categoryName, organizedContent });
+    res.json({ ok: true, title, categoryName });
 
   } catch (err) {
     console.error('[manual error]', err.message);
@@ -287,7 +272,7 @@ JSON만 출력하고 다른 텍스트는 절대 쓰지 마세요.`
   }
 });
 
-// 매뉴얼 카테고리 이동
+// ── 매뉴얼 카테고리 이동 ────────────────────────
 router.patch('/:storeId/:manualId/category', auth, async (req, res) => {
   const { categoryId } = req.body;
   const { storeId, manualId } = req.params;
@@ -302,12 +287,10 @@ router.patch('/:storeId/:manualId/category', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── 매뉴얼 수정 ────────────────────────────────
+// ── 매뉴얼 수정 ─────────────────────────────────
 router.put('/edit/:manualId', auth, async (req, res) => {
   const { content } = req.body;
   const { manualId } = req.params;
-
- const newContent = content ?? '';
 
   try {
     const { data: original } = await supabase
@@ -316,13 +299,11 @@ router.put('/edit/:manualId', auth, async (req, res) => {
       .eq('id', manualId)
       .single();
 
-    // 그냥 content만 업데이트 (AI 재정리 없음)
     await supabase
       .from('manuals')
       .update({ content })
       .eq('id', manualId);
 
-    // 기존 청크 삭제 후 새로 임베딩만 생성
     await supabase
       .from('manuals')
       .delete()
@@ -330,7 +311,8 @@ router.put('/edit/:manualId', auth, async (req, res) => {
       .eq('title', original.title)
       .eq('is_chunk', true);
 
-    const chunks = splitIntoChunks(content);
+    // content는 텍스트이므로 직접 배열로 감싸서 splitIntoItems 처리
+    const chunks = splitIntoItems([{ title: original.title, content }]);
     for (const chunk of chunks) {
       const embRes = await openai.embeddings.create({
         model: 'text-embedding-3-small',
@@ -346,14 +328,13 @@ router.put('/edit/:manualId', auth, async (req, res) => {
     }
 
     res.json({ ok: true });
-
   } catch (err) {
     console.error('[manual update error]', err.message);
     res.status(500).json({ error: '수정 실패' });
   }
 });
 
-// ── 매뉴얼 삭제 ────────────────────────────────
+// ── 매뉴얼 삭제 ─────────────────────────────────
 router.delete('/:storeId/:manualId', auth, async (req, res) => {
   const { storeId, manualId } = req.params;
 
@@ -364,10 +345,7 @@ router.delete('/:storeId/:manualId', auth, async (req, res) => {
       .eq('id', manualId)
       .single();
 
-    // 원본 삭제
     await supabase.from('manuals').delete().eq('id', manualId);
-
-    // 같은 제목의 청크 전부 삭제
     await supabase.from('manuals').delete()
       .eq('store_id', storeId)
       .eq('title', original.title)
@@ -380,9 +358,10 @@ router.delete('/:storeId/:manualId', auth, async (req, res) => {
   }
 });
 
-// ── 녹음 업로드 → 매뉴얼 자동 변환 ──────────────
+// ── 녹음 업로드 → 보완 질문 생성 ────────────────
 router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) => {
   const { storeId } = req.params;
+  const { bizType = '매장' } = req.body;
   const file = req.file;
 
   if (!file) return res.status(400).json({ error: '파일 필수' });
@@ -392,47 +371,32 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
   fs.renameSync(file.path, newPath);
 
   try {
-    // 1. STT 변환
+    // STT 변환
     const audioStream = fs.createReadStream(newPath);
     const transcription = await groqClient.audio.transcriptions.create({
-      file: audioStream,
-      model: 'whisper-large-v3',
+      file:     audioStream,
+      model:    'whisper-large-v3',
       language: 'ko'
     });
     const rawText = transcription.text;
     fs.unlinkSync(newPath);
 
-    // 2. GPT로 정리
-    const organized = await openai.chat.completions.create({
+    // 보완 질문 생성 (MANUAL_FROM_AUDIO 사용)
+    const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        {
-          role: 'system',
-          content: `편의점/카페/식당 업무 매뉴얼 작성 전문가예요.
-아래 음성 인식 텍스트를 매뉴얼로 정리해주세요.
-
-규칙:
-1. 입력된 내용에 없는 정보는 절대 추가하지 마세요
-2. 절차가 있으면 순서대로 나눠요
-3. 최소 3개 이상의 세부 항목으로 나눠요
-
-출력 형식:
-## 중분류
-### 소분류
-- 내용
-
-마크다운 텍스트만 출력하세요.`
-        },
-        { role: 'user', content: rawText }
+        { role: 'system', content: PROMPTS.MANUAL_FROM_AUDIO({ bizType, rawText }) },
+        { role: 'user',   content: rawText }
       ],
-      max_tokens: 2000,
+      max_tokens: 300,
       temperature: 0.2
     });
 
-    const organizedText = organized.choices[0].message.content;
-    console.log('[upload] organizedText:', organizedText?.slice(0, 100));
+    const raw = completion.choices[0].message.content;
+    const { questions, enough } = parseAskResponse(raw);
 
-    res.json({ rawText, organizedText, ok: true });
+    // rawText 는 프론트에서 저장 시 content 로 재사용
+    res.json({ rawText, needsMore: !enough, questions, ok: true });
 
   } catch (err) {
     if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
@@ -440,9 +404,10 @@ router.post('/:storeId/upload', auth, upload.single('audio'), async (req, res) =
     res.status(500).json({ error: 'STT 변환 실패: ' + err.message });
   }
 });
-// 기초 매뉴얼 저장
+
+// ── 기초 매뉴얼 저장 ────────────────────────────
 router.post('/:storeId/basic', auth, async (req, res) => {
-  const { content } = req.body;
+  const { content, bizType = '매장' } = req.body;
   const { storeId } = req.params;
 
   if (!content) return res.status(400).json({ error: '내용 필수' });
@@ -455,7 +420,6 @@ router.post('/:storeId/basic', auth, async (req, res) => {
 
     const categoryList = categories?.map(c => c.name).join(', ') || '';
 
-    // 긴 텍스트는 2000자씩 나눠서 처리
     const CHUNK_SIZE = 2000;
     const textChunks = [];
     for (let i = 0; i < content.length; i += CHUNK_SIZE) {
@@ -468,23 +432,7 @@ router.post('/:storeId/basic', auth, async (req, res) => {
         messages: [
           {
             role: 'system',
-            content: `편의점/카페/식당 첫 출근 알바생을 위한 기초 매뉴얼 작성 전문가예요.
-아래 텍스트를 첫 출근자가 이해하기 쉽게 정리해주세요.
-
-규칙:
-1. 입력된 내용에 없는 정보는 절대 추가하지 마세요
-2. 처음 보는 사람도 이해할 수 있게 단계별로 작성해요
-3. 최소 3개 이상의 세부 항목으로 나눠요
-
-${categoryList ? `현재 카테고리: ${categoryList}` : ''}
-
-출력 형식 (JSON):
-{
-  "category": "카테고리명",
-  "title": "제목",
-  "content": "## 중분류\\n### 소분류\\n- 내용"
-}
-JSON만 출력하세요.`
+            content: PROMPTS.MANUAL_BASIC({ bizType, categoryList })
           },
           { role: 'user', content: chunk }
         ],
@@ -492,18 +440,8 @@ JSON만 출력하세요.`
         temperature: 0.2
       });
 
-      let categoryName = '기초';
-      let title = '기초 매뉴얼';
-      let organizedContent = chunk;
-
-      try {
-        const parsed = JSON.parse(organized.choices[0].message.content);
-        categoryName   = parsed.category || '기초';
-        title          = parsed.title    || '기초 매뉴얼';
-        organizedContent = parsed.content || chunk;
-      } catch {
-        organizedContent = chunk;
-      }
+      const raw = organized.choices[0].message.content;
+      const { category: categoryName, title, chunks: itemChunks } = parseOrganizeResponse(raw, chunk);
 
       let categoryId = null;
       const existingCat = categories?.find(
@@ -520,19 +458,17 @@ JSON만 출력하세요.`
         categoryId = newCat?.id;
       }
 
-      const { data: saved } = await supabase.from('manuals').insert({
+      await supabase.from('manuals').insert({
         store_id:         storeId,
         category_id:      categoryId,
         title,
-        content:          organizedContent,
+        content:          itemChunks.join('\n'),
         original_content: chunk,
         is_chunk:         false,
         manual_type:      'basic'
-      }).select().single();
+      });
 
-      // 임베딩
-      const embChunks = splitIntoChunks(organizedContent);
-      for (const embChunk of embChunks) {
+      for (const embChunk of itemChunks) {
         const embRes = await openai.embeddings.create({
           model: 'text-embedding-3-small',
           input: embChunk
@@ -558,7 +494,7 @@ JSON만 출력하세요.`
   }
 });
 
-// 기초 매뉴얼 목록 조회
+// ── 기초 매뉴얼 목록 조회 ───────────────────────
 router.get('/:storeId/basic', auth, async (req, res) => {
   const { data, error } = await supabase
     .from('manuals')
@@ -569,20 +505,6 @@ router.get('/:storeId/basic', auth, async (req, res) => {
     .eq('store_id', req.params.storeId)
     .eq('is_chunk', false)
     .eq('manual_type', 'basic')
-    .order('created_at', { ascending: false });
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-router.get('/:storeId', auth, async (req, res) => {
-  const { data, error } = await supabase
-    .from('manuals')
-    .select(`
-      id, title, content, original_content, category_id, created_at,
-      manual_node_media(id, node_label, url, caption)
-    `)
-    .eq('store_id', req.params.storeId)
-    .eq('is_chunk', false)
     .order('created_at', { ascending: false });
 
   if (error) return res.status(500).json({ error: error.message });

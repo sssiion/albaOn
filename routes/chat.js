@@ -4,6 +4,25 @@ const auth = require('../middleware/auth');
 const { supabase } = require('../lib/supabase');
 const OpenAI = require('openai');
 
+function formatAnswers(raw = '') {
+  try {
+    const clean = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    const answers = parsed.answers || [];
+    return {
+      answers,
+      isAnswered: answers.length > 0,
+    };
+  } catch {
+    // 파싱 실패 시 원본 텍스트를 단일 답변으로
+    const isAnswered = !raw.includes('매뉴얼에 없는 내용');
+    return {
+      answers: isAnswered ? [{ title: '답변', content: raw }] : [],
+      isAnswered,
+    };
+  }
+}
+
 // 임베딩용 (OpenAI)
 const openai = new OpenAI({ 
   apiKey: process.env.OPENAI_API_KEY 
@@ -63,19 +82,19 @@ ${context || '등록된 매뉴얼이 없어요.'}`
       temperature: 0.3
     });
 
-    const answer = completion.choices[0].message.content;
-    const isAnswered = !answer.includes('매뉴얼에 없는 내용');
+    const raw = completion.choices[0].message.content;
+const { answers, isAnswered } = formatAnswers(raw);
 
     // 로그 저장 시 worker_id 대신 worker_name 저장
     await supabase.from('chat_logs').insert({
       store_id:    storeId,
       worker_name: workerName || '알바생',  // worker_id 대신
       question,
-      answer,
+      answer: JSON.stringify(answers),
       is_answered: isAnswered
     });
 
-    res.json({ answer, isAnswered });
+    res.json({ answers, isAnswered });
 
   } catch (err) {
     console.error('[chat error]', err.message);
@@ -150,8 +169,8 @@ ${context || '등록된 매뉴얼이 없어요.'}`
       temperature: 0.3
     });
 
-    const answer = completion.choices[0].message.content;
-    const isAnswered = !answer.includes('매뉴얼에 없는 내용');
+    const raw = completion.choices[0].message.content;
+    const { answers, isAnswered } = formatAnswers(raw);
 
     // 5. 답변 업데이트
     await supabase
